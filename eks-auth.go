@@ -2,6 +2,7 @@
 MIT License
 
 Copyright (c) 2022 Jake Scaltreto
+Copyright (c) 2024 Lyu Zizheng
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,18 +21,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
 */
 
 package main
 
 import (
 	"context"
-	"flag"
-	"fmt"
-	"log"
-
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
+	"fmt"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -61,22 +63,36 @@ type ExecCredential struct {
 func main() {
 	ctx := context.Background()
 
-	var clusterName, roleArn string
+	var region, clusterName, roleArn string
+	flag.StringVar(&region, "region", "", "AWS region")
 	flag.StringVar(&clusterName, "cluster-name", "", "Name of the EKS cluster")
-	flag.StringVar(&roleArn, "role-arn", "", "Assume this role for credentials")
+	flag.StringVar(&roleArn, "role", "", "IAM role ARN to assume")
 	flag.Parse()
 
+	// If cluster name is not provided, print usage and exit
 	if clusterName == "" {
-		panic("cluster-name is required!")
+		flag.Usage()
+		return
 	}
 
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// Skip TLS verification
+	cfg, err := config.LoadDefaultConfig(ctx, 
+		config.WithHTTPClient(&http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}}),
+	)
 	if err != nil {
-		log.Fatalf("Failed to load AWS config %v", err)
+		println("Failed to load AWS config: ", err.Error())
+		return
 	}
+
+	// If region is provided, use it
+	if region != "" {
+		cfg.Region = region
+	} 
 
 	client := sts.NewFromConfig(cfg)
-
+	// If role ARN is provided, assume the role
 	if roleArn != "" {
 		creds := stscreds.NewAssumeRoleProvider(client, roleArn)
 		cfg.Credentials = aws.NewCredentialsCache(creds)
@@ -85,12 +101,14 @@ func main() {
 
 	token, err := getToken(ctx, client, clusterName)
 	if err != nil {
-		log.Fatalf("Failed to fetch STS token: %v", err)
+		println("Failed to fetch STS token: ", err.Error())
+		return
 	}
 
 	auth, err := getExecAuth(token)
 	if err != nil {
-		log.Fatalf("Failed to generate ExecCredential: %v", err)
+		println("Failed to generate ExecCredential: ", err.Error())
+		return
 	}
 
 	fmt.Println(auth)
@@ -113,7 +131,20 @@ func getToken(ctx context.Context, client *sts.Client, clusterName string) (stri
 		&sts.GetCallerIdentityInput{},
 		func(pso *sts.PresignOptions) {
 			pso.ClientOptions = append(pso.ClientOptions, sts.WithAPIOptions(
-				addEksHeader(clusterName),
+				func(stack *middleware.Stack) error {
+					return stack.Build.Add(middleware.BuildMiddlewareFunc("AddEKSId", func(
+						ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
+					) (middleware.BuildOutput, middleware.Metadata, error) {
+						switch req := in.Request.(type) {
+						case *smithyhttp.Request:
+							query := req.URL.Query()
+							query.Add(EXPIRE_PARAM, EXPIRE_PARAM_VALUE)
+							req.URL.RawQuery = query.Encode()
+							req.Header.Add(K8S_AWS_ID_HEADER, clusterName)
+						}
+						return next.HandleBuild(ctx, in)
+					}), middleware.Before)
+				},
 			))
 		},
 	)
@@ -126,20 +157,3 @@ func getToken(ctx context.Context, client *sts.Client, clusterName string) (stri
 		EncodeToString([]byte(req.URL)), nil
 }
 
-func addEksHeader(cluster string) func(*middleware.Stack) error {
-	return func(stack *middleware.Stack) error {
-		return stack.Build.Add(middleware.BuildMiddlewareFunc("AddEKSId", func(
-			ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
-		) (middleware.BuildOutput, middleware.Metadata, error) {
-			switch req := in.Request.(type) {
-			case *smithyhttp.Request:
-				query := req.URL.Query()
-				query.Add(EXPIRE_PARAM, EXPIRE_PARAM_VALUE)
-				req.URL.RawQuery = query.Encode()
-
-				req.Header.Add(K8S_AWS_ID_HEADER, cluster)
-			}
-			return next.HandleBuild(ctx, in)
-		}), middleware.Before)
-	}
-}

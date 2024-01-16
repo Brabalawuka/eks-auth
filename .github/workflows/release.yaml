@@ -1,23 +1,26 @@
-on:
+name: Go Build
+
+on: 
   release:
     types: [created]
 
 jobs:
-  releases-matrix:
-    name: Release Go Binary
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v3
-    - uses: wangyoucao577/go-release-action@v1.33
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        goos: ${{ matrix.goos }}
-        goarch: ${{ matrix.goarch }}
-        goversion: 1.19
-        ldflags: "-s -w"
-        extra_files: LICENSE README.md
-        compress_assets: auto
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v4
+      - name: Set up Go.
+        uses: actions/setup-go@v4
+        with:
+          go-version: ^1.21
+      - name: Build
+        run: |
+          export CGO_ENABLED=0
+          export GOOS=linux
+          go build -ldflags="-w -s" -o eks-auth .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eks-auth
+          path: ./eks-auth
