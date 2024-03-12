@@ -15,13 +15,22 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: ^1.21
-      - name: Build
+      - name: Build For arm64
         run: |
           export CGO_ENABLED=0
           export GOOS=linux
-          go build -ldflags="-w -s" -o eks-auth .
+          export GOARCH=arm64
+          go build -ldflags="-w -s" -o eks-auth-arm64 .
+      - name: Build For amd64
+        run: |
+          export CGO_ENABLED=0
+          export GOOS=linux
+          export GOARCH=amd64
+          go build -ldflags="-w -s" -o eks-auth-amd64 .
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: eks-auth
+          files: | 
+            eks-auth-arm64
+            eks-auth-amd64
           generate_release_notes: true
